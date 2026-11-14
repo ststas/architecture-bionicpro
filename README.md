@@ -67,3 +67,11 @@ Airflow DAG и окружение для него.
 ```sql
 SELECT * FROM bionicpro.report_user_daily ORDER BY customer_id, report_date, prosthesis_id
 ```
+
+### Задача 3
+
+Сервис отчётов [reports-api](reports-api) на Express.js и TypeScript, порт 8000.
+
+- **Эндпоинт.** `GET /reports?from=YYYY-MM-DD&to=YYYY-MM-DD` возвращает JSON с показателями протезов пользователя по дням. Оба параметра необязательны: без них отдаётся весь доступный период.
+- **Запрос в OLAP.** Сервис читает готовую витрину `report_user_daily` в ClickHouse одним `SELECT` по `customer_id` и периоду, без вычислений на лету ([src/reports.ts](reports-api/src/reports.ts)). Значения передаются параметрами запроса, а не подставляются в текст SQL.
+- **Запуск.** Сервис `reports-api` в [docker-compose.yaml](docker-compose.yaml); образ собирается в два этапа — сборка TypeScript и запуск только собранного кода.

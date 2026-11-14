@@ -173,6 +173,31 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # --- Задание 2: сервис отчётов ---
+  reports-api:
+    build:
+      context: ./reports-api
+    environment:
+      PORT: "8000"
+      CORS_ORIGIN: http://localhost:3000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: bionicpro
+      CLICKHOUSE_PASSWORD: bionicpro_password
+      CLICKHOUSE_DB: bionicpro
+      # Issuer — адрес Keycloak из токена (каким его видит браузер); ключи забираются по внутреннему адресу
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/reports-realm
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/reports-realm/protocol/openid-connect/certs
+      KEYCLOAK_CLIENT_ID: reports-frontend
+      REQUIRED_ROLE: prothetic_user
+    ports:
+      - "8000:8000"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   crm_db_data:
   telemetry_db_data:

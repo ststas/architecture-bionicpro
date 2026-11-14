@@ -1,0 +1,6 @@
+.git
+**/node_modules
+**/build
+**/dist
+**/.DS_Store
+postgres-keycloak-data

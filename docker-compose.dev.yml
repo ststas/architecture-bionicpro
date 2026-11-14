@@ -1,11 +1,12 @@
 services:
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: frontend/Dockerfile.dev
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules
+      - ./shared:/shared:ro
     ports:
       - "3000:3000"
     environment:
@@ -16,6 +17,8 @@ services:
       HOST: 0.0.0.0
       CHOKIDAR_USEPOLLING: "true"
       WATCHPACK_POLLING: "true"
+    # Том node_modules сохраняется между сборками: синхронизируем его с lock-файлом.
+    command: sh -c "npm ci --no-audit --no-fund && npm start"
     stdin_open: true
     tty: true
 

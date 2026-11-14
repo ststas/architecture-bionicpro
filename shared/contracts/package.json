@@ -1,0 +1,8 @@
+{
+  "name": "@bionicpro/contracts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Общий контракт Reports API и фронтенда BionicPRO",
+  "types": "index.d.ts",
+  "files": ["index.d.ts"]
+}

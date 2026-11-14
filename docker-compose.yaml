@@ -26,6 +26,8 @@ services:
     command: 
       - start-dev
       - --import-realm
+      # customer_id определяет, чей отчёт видит пользователь: запрещаем менять его самому пользователю
+      - --spi-user-profile-legacy-user-profile-read-only-attributes=customer_id
     volumes:
       - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
     ports:
@@ -36,8 +38,8 @@ services:
     restart: unless-stopped
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: frontend/Dockerfile
     ports:
       - "3000:3000"
     environment:
@@ -45,3 +47,165 @@ services:
       REACT_APP_KEYCLOAK_URL: http://localhost:8080
       REACT_APP_KEYCLOAK_REALM: reports-realm
       REACT_APP_KEYCLOAK_CLIENT_ID: reports-frontend
+
+  # --- Задание 2: источники данных (заглушки) ---
+  crm_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: crm_db
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: crm_password
+    volumes:
+      - crm_db_data:/var/lib/postgresql/data
+      - ./db/crm/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm_user -d crm_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  telemetry_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: telemetry_db
+      POSTGRES_USER: telemetry_user
+      POSTGRES_PASSWORD: telemetry_password
+    volumes:
+      - telemetry_db_data:/var/lib/postgresql/data
+      - ./db/telemetry/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telemetry_user -d telemetry_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- Задание 2: OLAP ---
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_DB: bionicpro
+      CLICKHOUSE_USER: bionicpro
+      CLICKHOUSE_PASSWORD: bionicpro_password
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ports:
+      - "8123:8123"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- Задание 2: Airflow (LocalExecutor) ---
+  airflow_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: airflow_db
+      POSTGRES_USER: airflow_user
+      POSTGRES_PASSWORD: airflow_password
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow_user -d airflow_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  airflow-init:
+    <<: &airflow-common
+      build:
+        context: ./airflow
+      environment:
+        AIRFLOW__CORE__EXECUTOR: LocalExecutor
+        AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow_user:airflow_password@airflow_db:5432/airflow_db
+        AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+        AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+        AIRFLOW__WEBSERVER__SECRET_KEY: bionicpro-dev-secret
+        PYTHONDONTWRITEBYTECODE: "1"
+      volumes:
+        - ./airflow/dags:/opt/airflow/dags
+        - ./airflow/sql:/opt/airflow/sql
+        - ./airflow/scripts:/opt/airflow/scripts:ro
+    # Миграции, пользователь admin, подключения и начальная дата DAG.
+    # Подключения сохраняются в базе Airflow, поэтому видны в интерфейсе: Admin -> Connections.
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        airflow db migrate
+        airflow users create --username admin --password admin --firstname Admin --lastname Admin --role Admin --email admin@example.com
+        add_conn() {
+          airflow connections delete "$$1" >/dev/null 2>&1 || true
+          airflow connections add "$$@"
+        }
+        add_conn crm_db --conn-type postgres --conn-host crm_db --conn-port 5432 --conn-schema crm_db --conn-login crm_user --conn-password crm_password --conn-description "CRM: клиенты и протезы (источник ETL)"
+        add_conn telemetry_db --conn-type postgres --conn-host telemetry_db --conn-port 5432 --conn-schema telemetry_db --conn-login telemetry_user --conn-password telemetry_password --conn-description "Телеметрия протезов (источник ETL)"
+        add_conn clickhouse --conn-type http --conn-host clickhouse --conn-port 8123 --conn-schema bionicpro --conn-login bionicpro --conn-password bionicpro_password --conn-description "ClickHouse: сырые таблицы и витрина отчётов"
+        python /opt/airflow/scripts/bootstrap_reports.py
+    depends_on:
+      airflow_db:
+        condition: service_healthy
+      telemetry_db:
+        condition: service_healthy
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      crm_db:
+        condition: service_healthy
+      telemetry_db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8081:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # --- Задание 2: сервис отчётов ---
+  reports-api:
+    build:
+      context: .
+      dockerfile: reports-api/Dockerfile
+    environment:
+      PORT: "8000"
+      CORS_ORIGIN: http://localhost:3000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: bionicpro
+      CLICKHOUSE_PASSWORD: bionicpro_password
+      CLICKHOUSE_DB: bionicpro
+      # Issuer — адрес Keycloak из токена (каким его видит браузер); ключи забираются по внутреннему адресу
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/reports-realm
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/reports-realm/protocol/openid-connect/certs
+      KEYCLOAK_CLIENT_ID: reports-frontend
+      REQUIRED_ROLE: prothetic_user
+    ports:
+      - "8000:8000"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  crm_db_data:
+  telemetry_db_data:
+  clickhouse_data:
+  airflow_db_data:

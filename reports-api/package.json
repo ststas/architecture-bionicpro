@@ -1,0 +1,30 @@
+{
+  "name": "reports-api",
+  "version": "1.0.0",
+  "description": "BionicPRO: сервис отчётов. Отдаёт пользователю готовый отчёт из витрины ClickHouse.",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.cjs",
+    "test:auth:live": "npm run build && node test/auth-live.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@bionicpro/contracts": "file:../shared/contracts",
+    "@clickhouse/client": "^1.25.0",
+    "cors": "^2.8.5",
+    "express": "^4.22.3",
+    "jose": "^5.10.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "typescript": "~5.9.0"
+  }
+}

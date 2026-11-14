@@ -16,6 +16,15 @@ const ReportPage: React.FC = () => {
       setLoading(true);
       setError(null);
 
+      // Обновляем access-токен, если он истекает в ближайшие 30 секунд.
+      try {
+        await keycloak.updateToken(30);
+      } catch {
+        // Refresh-токен недействителен — нужен повторный вход.
+        await keycloak.login();
+        return;
+      }
+
       const response = await fetch(`${process.env.REACT_APP_API_URL}/reports`, {
         headers: {
           Authorization: `Bearer ${keycloak.token}`,

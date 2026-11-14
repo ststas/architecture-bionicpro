@@ -7,7 +7,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.cjs",
+    "test:auth:live": "npm run build && node test/auth-live.cjs"
   },
   "engines": {
     "node": ">=20"

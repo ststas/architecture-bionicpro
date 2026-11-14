@@ -75,3 +75,21 @@ SELECT * FROM bionicpro.report_user_daily ORDER BY customer_id, report_date, pro
 - **Эндпоинт.** `GET /reports?from=YYYY-MM-DD&to=YYYY-MM-DD` возвращает JSON с показателями протезов пользователя по дням. Оба параметра необязательны: без них отдаётся весь доступный период.
 - **Запрос в OLAP.** Сервис читает готовую витрину `report_user_daily` в ClickHouse одним `SELECT` по `customer_id` и периоду, без вычислений на лету ([src/reports.ts](reports-api/src/reports.ts)). Значения передаются параметрами запроса, а не подставляются в текст SQL.
 - **Запуск.** Сервис `reports-api` в [docker-compose.yaml](docker-compose.yaml); образ собирается в два этапа — сборка TypeScript и запуск только собранного кода.
+
+### Задача 4
+
+Ограничение доступа к отчётам реализовано middleware [requireUser](reports-api/src/auth.ts), подключённым к `GET /reports` до обращения к ClickHouse.
+
+- **Проверка токена.** `jose` проверяет подпись RS256 по JWKS Keycloak, issuer, срок действия, обязательные `exp` и `sub`, клиент `reports-frontend` и тип access-токена `Bearer`.
+- **Отказ в доступе.** Без действительного access-токена — `401`. Без роли `prothetic_user` или корректного `customer_id` — `403`.
+- **Только собственные данные.** `customer_id` берётся только из проверенного токена и передаётся параметром в фильтр ClickHouse. Параметры запроса не меняют владельца отчёта.
+
+**Проверки.** Из каталога `reports-api`:
+
+```sh
+npm test
+npm run typecheck
+npm run test:auth:live
+```
+
+Пройдены 31 сценарий доступа и проверка TypeScript. На работающем стенде подтверждено: `prothetic1..3` получают только свои отчёты, `user1` — `403`, без токена или с недопустимым токеном — `401`. Проверка `test:auth:live` требует запущенных Keycloak и Reports API и заполненной DAG тестовой витрины.

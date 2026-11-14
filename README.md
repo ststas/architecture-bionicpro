@@ -24,3 +24,14 @@ Authorization Code Grant заменён на Authorization Code Flow с PKCE.
 - **Вызов API** ([frontend/src/components/ReportPage.tsx](frontend/src/components/ReportPage.tsx)): перед запросом access-токен обновляется через `keycloak.updateToken()`; если обновить не удалось, пользователь отправляется на повторный вход.
 
 Realm импортируется только в пустую базу Keycloak, поэтому для применения настроек нужно удалить каталог `postgres-keycloak-data` и перезапустить `docker compose up`.
+
+## Задание 2. Разработка сервиса отчётов
+
+### Задача 1
+
+Архитектура подготовки и получения отчётов.
+Диаграмма: [task2/BionicPRO_C4_model_task2.drawio](task2/BionicPRO_C4_model_task2.drawio).
+
+- **ETL.** Airflow раз в день читает клиентов из CRM DB и телеметрию из PostgreSQL, записывает их в ClickHouse и собирает витрину `report_user_daily` — агрегаты телеметрии по клиенту и дню.
+- **Отдельный сервис отчётов.** Отчёты отдаёт Reports API, а не существующий API: тот занят приёмом телеметрии, и нагрузки не должны влиять друг на друга.
+- **Получение отчёта.** Reports API (`GET /reports`) проверяет токен по ключам Keycloak, определяет пользователя по токену и читает из витрины только его строки простым запросом, без вычислений на лету.

@@ -15,6 +15,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@bionicpro/contracts": "file:../shared/contracts",
     "@clickhouse/client": "^1.25.0",
     "cors": "^2.8.5",
     "express": "^4.22.3",

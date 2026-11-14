@@ -34,10 +34,22 @@ test("GET /reports: проверка JWT и изоляция клиентов", 
   // Реальные JWT, HTTP и JWKS; подменяем только чтение OLAP.
   const { clickhouse } = require("../dist/clickhouse");
   const calls = [];
+  const martRow = (id, date = "2026-01-01", movements = 100) => ({
+    prosthesis_id: id, prosthesis_model: `Model ${id}`, serial_number: `SN-${id}`,
+    report_date: date, measurements: 24, movements_total: movements,
+    avg_reaction_ms: 80, max_reaction_ms: 95, battery_min: 20, battery_avg: 60, errors_total: 0,
+  });
+  let fixtureRows;
   const originalQuery = clickhouse.query;
   clickhouse.query = async (options) => {
     calls.push(options);
-    return { json: async () => [{ prosthesis_id: options.query_params.customer_id * 100 }] };
+    const rows = fixtureRows ?? [martRow(options.query_params.customer_id * 100)];
+    if (options.query.includes("minOrNull")) {
+      const dates = rows.map(row => row.report_date).sort();
+      return { json: async () => [{ data_available_from: dates[0] ?? null, data_available_until: dates.at(-1) ?? null }] };
+    }
+    return { json: async () => rows.filter(row =>
+      row.report_date >= options.query_params.from && row.report_date <= options.query_params.to) };
   };
   t.after(async () => {
     clickhouse.query = originalQuery;
@@ -74,9 +86,11 @@ test("GET /reports: проверка JWT и изоляция клиентов", 
   async function denied(name, status, authorization) {
     await t.test(name, async () => {
       const count = calls.length;
-      const response = await request(authorization);
-      assert.equal(response.status, status);
-      assert.equal(response.body.error, status === 401 ? "unauthorized" : "forbidden");
+      for (const path of ["/reports", "/reports/availability"]) {
+        const response = await request(authorization, path);
+        assert.equal(response.status, status);
+        assert.equal(response.body.error, status === 401 ? "unauthorized" : "forbidden");
+      }
       assert.equal(calls.length, count, "Отказ в доступе должен происходить до обращения к OLAP");
     });
   }
@@ -124,15 +138,105 @@ test("GET /reports: проверка JWT и изоляция клиентов", 
         "/reports?customer_id=3&customerId=3&user_id=3&from=2026-01-01&to=2026-01-31");
       assert.equal(response.status, 200);
       assert.equal(response.body.customer_id, customerId);
-      assert.deepEqual(response.body.rows, [{ prosthesis_id: customerId * 100 }]);
+      const { prosthesis_id, prosthesis_model, serial_number, ...dailyRow } = martRow(customerId * 100);
+      assert.deepEqual(response.body.prostheses, [{
+        prosthesis_id, prosthesis_model, serial_number, rows: [dailyRow],
+      }]);
+      assert.equal("rows" in response.body, false);
       const query = calls.at(-1);
       assert.match(query.query, /WHERE\s+customer_id\s*=\s*\{customer_id:\s*UInt32\}/);
       assert.deepEqual(query.query_params, {
-        customer_id: customerId, from: "2026-01-01", to: "2026-01-31",
+        customer_id: customerId, from: "2026-01-01", to: "2026-01-01",
       });
     });
   }
   await t.test("схема Bearer нечувствительна к регистру", async () => {
     assert.equal((await request(`bearer ${valid}`)).status, 200);
   });
+  await t.test("два протеза: отдельные группы с показателями за каждый день", async (t) => {
+    fixtureRows = [martRow(102), martRow(103), martRow(102, "2026-01-02", 200), martRow(103, "2026-01-02", 300)];
+    t.after(() => { fixtureRows = undefined; });
+    const response = await request(`Bearer ${valid}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.body.prostheses.length, 2);
+    for (const [index, id] of [102, 103].entries()) {
+      const group = response.body.prostheses[index];
+      assert.equal(group.prosthesis_id, id);
+      assert.equal(group.prosthesis_model, `Model ${id}`);
+      assert.equal(group.serial_number, `SN-${id}`);
+      assert.deepEqual(group.rows, fixtureRows.filter(row => row.prosthesis_id === id).map(row => {
+        const { prosthesis_id, prosthesis_model, serial_number, ...dailyRow } = row;
+        return dailyRow;
+      }));
+    }
+  });
+  await t.test("пустой период: пустой список протезов", async (t) => {
+    fixtureRows = [];
+    t.after(() => { fixtureRows = undefined; });
+    const response = await request(`Bearer ${valid}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.prostheses, []);
+    assert.equal(response.body.period, null);
+    assert.equal(response.body.status, "no_data");
+    assert.equal(response.body.data_available_until, null);
+  });
+
+  await t.test("доступный период ограничен клиентом из токена", async () => {
+    const response = await request(`Bearer ${valid}`, "/reports/availability?customer_id=999");
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { data_available_from: "2026-01-01", data_available_until: "2026-01-01" });
+    assert.deepEqual(calls.at(-1).query_params, { customer_id: 1 });
+    assert.match(calls.at(-1).query, /WHERE\s+customer_id\s*=\s*\{customer_id:\s*UInt32\}/);
+  });
+  await t.test("нет данных: границы не превращаются в 1970-01-01", async (t) => {
+    fixtureRows = [];
+    t.after(() => { fixtureRows = undefined; });
+    assert.deepEqual((await request(`Bearer ${valid}`, "/reports/availability")).body,
+      { data_available_from: null, data_available_until: null });
+  });
+  await t.test("без дат возвращается только доступный период", async () => {
+    const response = await request(`Bearer ${valid}`);
+    assert.equal(response.body.status, "ok");
+    assert.deepEqual(response.body.period, { from: "2026-01-01", to: "2026-01-01" });
+    assert.equal(response.body.period_truncated, false);
+    assert.equal(response.body.data_available_until, "2026-01-01");
+  });
+  await t.test("запрошенный период обрезается с обеих сторон", async (t) => {
+    fixtureRows = [martRow(100, "2026-01-04"), martRow(100, "2026-01-13")];
+    t.after(() => { fixtureRows = undefined; });
+    const response = await request(`Bearer ${valid}`, "/reports?from=2026-01-01&to=2026-01-20");
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.period, { from: "2026-01-04", to: "2026-01-13" });
+    assert.equal(response.body.period_truncated, true);
+    assert.equal(response.body.data_available_until, "2026-01-13");
+    assert.deepEqual(calls.at(-1).query_params, { customer_id: 1, from: "2026-01-04", to: "2026-01-13" });
+  });
+  for (const period of ["from=2026-01-02&to=2026-01-03", "from=2025-01-01&to=2025-01-02", "from=2099-01-01"]) {
+    await t.test(`период вне витрины: ${period}`, async () => {
+      const count = calls.length;
+      const response = await request(`Bearer ${valid}`, `/reports?${period}`);
+      assert.equal(response.status, 200);
+      assert.equal(response.body.status, "period_unavailable");
+      assert.equal(response.body.period, null);
+      assert.deepEqual(response.body.prostheses, []);
+      assert.equal(calls.length, count + 1, "После проверки границ строки отчёта запрашиваться не должны");
+    });
+  }
+  await t.test("пустой день внутри границ отличается от недоступного периода", async (t) => {
+    fixtureRows = [martRow(100, "2026-01-01"), martRow(100, "2026-01-03")];
+    t.after(() => { fixtureRows = undefined; });
+    const response = await request(`Bearer ${valid}`, "/reports?from=2026-01-02&to=2026-01-02");
+    assert.equal(response.body.status, "no_data");
+    assert.deepEqual(response.body.prostheses, []);
+    assert.deepEqual(response.body.period, { from: "2026-01-02", to: "2026-01-02" });
+    assert.equal(response.body.period_truncated, false);
+  });
+  for (const period of ["from=invalid", "to=2026-02-30", "from=2026-01-03&to=2026-01-01", "from[]=2026-01-01"]) {
+    await t.test(`некорректные даты: ${period}`, async () => {
+      const count = calls.length;
+      const response = await request(`Bearer ${valid}`, `/reports?${period}`);
+      assert.equal(response.status, 400);
+      assert.equal(calls.length, count);
+    });
+  }
 });

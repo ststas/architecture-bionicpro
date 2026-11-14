@@ -21,7 +21,7 @@ Authorization Code Grant заменён на Authorization Code Flow с PKCE.
 
 - **Keycloak** ([keycloak/realm-export.json](keycloak/realm-export.json)), клиент `reports-frontend`: атрибут `pkce.code.challenge.method = S256` делает PKCE обязательным — запрос авторизации без `code_challenge` отклоняется. Отключены implicit flow и direct access grants, чтобы токен нельзя было получить в обход PKCE.
 - **Фронтенд** ([frontend/src/App.tsx](frontend/src/App.tsx)): `keycloak-js` инициализируется с `pkceMethod: 'S256'` — генерирует `code_verifier`, отправляет `code_challenge` при входе и предъявляет `code_verifier` при обмене кода на токены.
-- **Вызов API** ([frontend/src/components/ReportPage.tsx](frontend/src/components/ReportPage.tsx)): перед запросом access-токен обновляется через `keycloak.updateToken()`; если обновить не удалось, пользователь отправляется на повторный вход.
+- **Вызов API** ([frontend/src/components/ReportPage.tsx](frontend/src/components/ReportPage.tsx)): перед запросом access-токен обновляется через `keycloak.updateToken()`; если обновить не удалось, пользователю предлагается повторный вход.
 
 Realm импортируется только в пустую базу Keycloak, поэтому для применения настроек нужно удалить каталог `postgres-keycloak-data` и перезапустить `docker compose up`.
 
@@ -42,7 +42,7 @@ Airflow DAG и окружение для него.
 
 **Окружение.** В [docker-compose.yaml](docker-compose.yaml) добавлены сервисы для отчётности:
 
-- `crm_db` и `telemetry_db` — заглушки источников на PostgreSQL с тестовыми данными ([db/crm/init.sql](db/crm/init.sql), [db/telemetry/init.sql](db/telemetry/init.sql)). Идентификаторы клиентов совпадают с атрибутом `customer_id` пользователей `prothetic1..3` в Keycloak; телеметрия сгенерирована за 10 дней до момента первого запуска.
+- `crm_db` и `telemetry_db` — заглушки источников на PostgreSQL с тестовыми данными ([db/crm/init.sql](db/crm/init.sql), [db/telemetry/init.sql](db/telemetry/init.sql)). Идентификаторы клиентов совпадают с атрибутом `customer_id` пользователей `prothetic1..3` в Keycloak; телеметрия генерируется за 10 завершённых дней перед первым запуском базы, в UTC.
 - `clickhouse` — OLAP-база `bionicpro`, порт 8123.
 - `airflow-scheduler`, `airflow-webserver`, `airflow_db` — Airflow с LocalExecutor и своей PostgreSQL; интерфейс на http://localhost:8081 (admin / admin). Подключения `crm_db`, `telemetry_db` и `clickhouse` создаются при инициализации и видны в интерфейсе: Admin → Connections.
 
@@ -52,6 +52,8 @@ Airflow DAG и окружение для него.
 2. `load_crm` — выгружает клиентов и их протезы из CRM в `crm_customers`.
 3. `load_telemetry` — выгружает телеметрию за день в `telemetry_raw`.
 4. `build_mart` — собирает витрину `report_user_daily`: агрегаты телеметрии за день по клиенту и протезу, объединённые с данными CRM.
+
+При инициализации [bootstrap_reports.py](airflow/scripts/bootstrap_reports.py) сохраняет первую дату телеметрии в переменной Airflow `reports_etl_start_date`. DAG использует её как `start_date` и с `catchup=True` обрабатывает все 10 дней. Дата старта сохраняется при перезапусках; это проверяется [тестами инициализации](airflow/tests/test_bootstrap_reports.py).
 
 **Витрина.** Одна строка на пользователя, протез и день. Ключ сортировки `(customer_id, report_date, prosthesis_id)` даёт быстрый доступ к строкам одного клиента; партиции — по месяцам.
 
@@ -72,8 +74,9 @@ SELECT * FROM bionicpro.report_user_daily ORDER BY customer_id, report_date, pro
 
 Сервис отчётов [reports-api](reports-api) на Express.js и TypeScript, порт 8000.
 
-- **Эндпоинт.** `GET /reports?from=YYYY-MM-DD&to=YYYY-MM-DD` возвращает JSON с показателями протезов пользователя по дням. Оба параметра необязательны: без них отдаётся весь доступный период.
-- **Запрос в OLAP.** Сервис читает готовую витрину `report_user_daily` в ClickHouse одним `SELECT` по `customer_id` и периоду, без вычислений на лету ([src/reports.ts](reports-api/src/reports.ts)). Значения передаются параметрами запроса, а не подставляются в текст SQL.
+- **Эндпоинт.** `GET /reports?from=YYYY-MM-DD&to=YYYY-MM-DD` возвращает JSON с массивом `prostheses`: у каждого протеза указаны ID, модель, серийный номер и `rows` с показателями по дням. Группировку выполняет API после чтения витрины; при отсутствии данных возвращается `prostheses: []`. Оба параметра периода необязательны: без них отдаётся весь доступный период.
+- **Запрос в OLAP.** Сервис проверяет границы доступных данных, затем читает готовые строки витрины `report_user_daily` по `customer_id` и периоду ([src/reports.ts](reports-api/src/reports.ts)). Показатели не рассчитываются на лету; значения передаются параметрами SQL.
+- **Доступный период.** Защищённый `GET /reports/availability` возвращает `data_available_from` и `data_available_until` — минимальную и максимальную даты витрины текущего пользователя. `GET /reports` повторно проверяет границы и возвращает фактический `period`, признак `period_truncated` и доступные даты. Если весь период вне диапазона, ответ содержит `status: "period_unavailable"`, `period: null` и пустой список протезов; при отсутствии строк — `status: "no_data"`. Границы определяются по витрине, отдельный журнал успешных дней ETL не ведётся.
 - **Запуск.** Сервис `reports-api` в [docker-compose.yaml](docker-compose.yaml); образ собирается в два этапа — сборка TypeScript и запуск только собранного кода.
 
 ### Задача 4
@@ -92,4 +95,26 @@ npm run typecheck
 npm run test:auth:live
 ```
 
-Пройдены 31 сценарий доступа и проверка TypeScript. На работающем стенде подтверждено: `prothetic1..3` получают только свои отчёты, `user1` — `403`, без токена или с недопустимым токеном — `401`. Проверка `test:auth:live` требует запущенных Keycloak и Reports API и заполненной DAG тестовой витрины.
+Пройдены 45 сценариев проверки доступа, формата ответа и периодов, а также проверка TypeScript. Проверено: `prothetic1..3` получают только свои отчёты, `user1` — `403`, без токена или с недопустимым токеном — `401`. Проверка `test:auth:live` требует запущенных Keycloak и Reports API и заполненной DAG тестовой витрины.
+
+### Задача 5
+
+В [ReportPage](frontend/src/components/ReportPage.tsx) можно выбрать период и получить отдельную таблицу для каждого протеза с кнопками PDF и CSV. UI загружает доступные даты, ограничивает календарь и сообщает об обрезке периода. Перед запросом токен обновляется; обрабатываются `401`, `403` и отсутствие данных.
+
+**Экспорт.** Файлы создаются в браузере только для выбранного протеза, его ID включён в имя файла. [PDF](frontend/src/reports/pdf.ts) содержит те же шесть колонок, что и UI; модель и серийный номер вынесены над таблицей. Используются jsPDF, AutoTable и локальный шрифт с кириллицей. [CSV](frontend/src/reports/csv.ts) — русские заголовки, разделитель `;`, UTF-8 BOM и экранирование ячеек.
+
+**Общие типы.** Фронтенд и API используют единый контракт из [@bionicpro/contracts](shared/contracts/index.d.ts): показатели за день, группы протезов, период и его доступность, запрос, ответ и ошибки.
+
+**Dev-запуск:** `docker compose -f docker-compose.yaml -f docker-compose.dev.yml up -d --build`.
+
+**Проверки.** Сборки и тесты API пройдены. Проверены отдельные таблицы и PDF/CSV для двух протезов, границы календаря, ограничение периода на API, ошибки и отсутствие данных. Экспорт использует фактический период ответа.
+
+## Запуск и даты отчётов.
+
+На новой машине выполните `docker compose up -d --build` и дождитесь успешных запусков DAG `bionicpro_reports_etl` в Airflow. Скрипты создадут тестовые источники, а DAG заполнит ClickHouse. Уже заполненные базы находятся в локальных Docker-томах и в репозиторий не входят.
+
+- Если первый запуск выполняется в день `D` (UTC), источник создаёт данные за дни **от** `D − 10` **до** `D − 1` **включительно**: по одной записи в час для каждого протеза. Airflow начинает обработку с `D − 10`; текущий неполный день не включается.
+- В UI отображается доступный диапазон. Можно выбрать даты в его пределах или оставить поля «С» и «По» пустыми, чтобы получить все доступные данные.
+- Обычный перезапуск с сохранёнными Docker-томами сохраняет данные и дату старта DAG. Новый период относительно даты развёртывания создаётся при первой инициализации новой базы; тестовый генератор не добавляет данные ежедневно.
+
+Для проверки UI войдите как `prothetic1` / `prothetic123` (один протез) или `prothetic2` / `prothetic123` (два протеза), затем нажмите «Получить отчёт».

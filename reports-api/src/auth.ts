@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from "express";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { config } from "./config";
+import type { ReportErrorResponse } from "@bionicpro/contracts";
 
 /** Данные пользователя, взятые из проверенного токена. */
 export interface AuthUser {
@@ -21,7 +22,7 @@ const jwks = createRemoteJWKSet(new URL(config.keycloak.jwksUrl));
  * Проверяет access-токен Keycloak и кладёт пользователя в req.user.
  * 401 — токена нет или он недействителен; 403 — токен верный, но прав на отчёт нет.
  */
-export async function requireUser(req: Request, res: Response, next: NextFunction): Promise<void> {
+export async function requireUser(req: Request, res: Response<ReportErrorResponse>, next: NextFunction): Promise<void> {
   const header = req.headers.authorization ?? "";
   const token = /^Bearer\s+(\S+)$/i.exec(header)?.[1];
   if (!token) {

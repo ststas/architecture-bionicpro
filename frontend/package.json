@@ -3,9 +3,12 @@
     "version": "0.1.0",
     "private": true,
     "dependencies": {
+        "@bionicpro/contracts": "file:../shared/contracts",
         "@react-keycloak/web": "^3.4.0",
         "@types/react": "^18.0.0",
         "@types/react-dom": "^18.0.0",
+        "jspdf": "^4.2.1",
+        "jspdf-autotable": "^5.0.9",
         "keycloak-js": "^21.1.0",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",

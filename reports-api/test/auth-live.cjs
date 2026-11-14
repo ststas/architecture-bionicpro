@@ -69,8 +69,16 @@ async function reports(token, suffix = "") {
   return { status: response.status, body: await response.json() };
 }
 
+async function availability(token) {
+  const response = await request(`${api}/reports/availability?customer_id=999`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  return { status: response.status, body: await response.json() };
+}
+
 async function main() {
   assert.equal((await reports()).status, 401);
+  assert.equal((await availability()).status, 401);
   console.log("OK: без токена — 401");
   for (const [username, password, customerId, prostheses] of [
     ["prothetic1", "prothetic123", 1, [101]],
@@ -81,22 +89,48 @@ async function main() {
     const tokens = await login(username, password);
     try {
       const response = await reports(tokens.access_token, "?customer_id=999&user_id=999");
+      const available = await availability(tokens.access_token);
       if (customerId === null) {
         assert.equal(response.status, 403);
+        assert.equal(available.status, 403);
         console.log(`OK: ${username} без роли prothetic_user — 403`);
         continue;
       }
       assert.equal(response.status, 200);
       assert.equal(response.body.customer_id, customerId);
-      assert.ok(response.body.rows.length > 0, "Витрина должна быть заполнена DAG");
-      assert.deepEqual([...new Set(response.body.rows.map((row) => row.prosthesis_id))].sort(), prostheses);
+      assert.equal(available.status, 200);
+      assert.ok(available.body.data_available_from && available.body.data_available_until);
+      assert.equal(response.body.status, "ok");
+      assert.equal(response.body.period_truncated, false);
+      assert.deepEqual(response.body.period, {
+        from: available.body.data_available_from, to: available.body.data_available_until,
+      });
+      const clipped = await reports(tokens.access_token,
+        `?from=${available.body.data_available_from}&to=2099-01-02`);
+      assert.equal(clipped.status, 200);
+      assert.equal(clipped.body.period.to, available.body.data_available_until);
+      assert.equal(clipped.body.period_truncated, true);
+      assert.deepEqual(response.body.prostheses.map((group) => group.prosthesis_id).sort(), prostheses);
+      assert.equal("rows" in response.body, false);
+      for (const group of response.body.prostheses) {
+        assert.ok(group.rows.length > 0, "Витрина должна быть заполнена DAG");
+        assert.ok(group.prosthesis_model && group.serial_number);
+        const dates = group.rows.map(row => row.report_date);
+        assert.deepEqual(dates, [...dates].sort());
+        assert.ok(group.rows.every(row => !("prosthesis_id" in row) && !("serial_number" in row)));
+      }
+      const empty = await reports(tokens.access_token, "?from=2099-01-01&to=2099-01-02");
+      assert.equal(empty.status, 200);
+      assert.deepEqual(empty.body.prostheses, []);
+      assert.equal(empty.body.period, null);
+      assert.equal(empty.body.status, "period_unavailable");
       const parts = tokens.access_token.split(".");
       const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString());
       parts[1] = Buffer.from(JSON.stringify({ ...claims, customer_id: 999 })).toString("base64url");
       assert.equal((await reports(parts.join("."))).status, 401);
       assert.equal((await reports(tokens.id_token)).status, 401);
       assert.equal((await reports(tokens.refresh_token)).status, 401);
-      console.log(`OK: ${username} — только свои протезы; поддельный, ID- и refresh-токены — 401`);
+      console.log(`OK: ${username} — своих групп: ${prostheses.length}; доступные даты, обрезка и недоступный период; недопустимые токены — 401`);
     } finally {
       const logout = await request(`${oidc}/logout`, {
         method: "POST",

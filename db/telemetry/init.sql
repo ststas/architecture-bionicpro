@@ -1,6 +1,9 @@
 -- Заглушка базы телеметрии: показания протезов.
 -- prosthesis_id совпадает с prostheses.id в заглушке CRM.
 
+-- Один и тот же календарный день в источнике и в Airflow.
+SET TIME ZONE 'UTC';
+
 CREATE TABLE telemetry (
     id                BIGSERIAL PRIMARY KEY,
     prosthesis_id     INTEGER NOT NULL,
@@ -14,7 +17,7 @@ CREATE TABLE telemetry (
 CREATE INDEX telemetry_recorded_at_idx ON telemetry (recorded_at);
 
 -- Тестовые данные: одна запись в час на каждый протез
--- с начала суток 10 дней назад до текущего момента (сегодняшний день неполный).
+-- за 10 завершённых суток: [сегодня - 10 дней, сегодня), в UTC.
 SELECT setseed(0.42);
 
 INSERT INTO telemetry (prosthesis_id, recorded_at, movements_count, avg_reaction_ms, battery_level, error_count)
@@ -28,6 +31,6 @@ SELECT
 FROM unnest(ARRAY[101, 102, 103, 104]) AS p (id)
 CROSS JOIN generate_series(
     date_trunc('day', now()) - INTERVAL '10 days',
-    now(),
+    date_trunc('day', now()) - INTERVAL '1 hour',
     INTERVAL '1 hour'
 ) AS ts;

@@ -15,6 +15,7 @@ import clickhouse_connect
 import pendulum
 from airflow.decorators import dag, task
 from airflow.hooks.base import BaseHook
+from airflow.models import Variable
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 SQL_DIR = Path("/opt/airflow/sql")
@@ -40,7 +41,9 @@ def clickhouse_client():
     dag_id="bionicpro_reports_etl",
     description="CRM и телеметрия -> ClickHouse -> витрина отчётов report_user_daily",
     schedule="@daily",
-    start_date=pendulum.datetime(2026, 11, 1, tz="UTC"),
+    # airflow-init фиксирует первую дату источника (день первого запуска минус 10 дней).
+    # Значение сохраняется в БД Airflow и не сдвигается при каждом разборе DAG.
+    start_date=pendulum.parse(Variable.get("reports_etl_start_date"), tz="UTC"),
     catchup=True,  # дозагрузить уже прошедшие дни
     max_active_runs=1,  # дни обрабатываются по очереди
     default_args={"retries": 1, "retry_delay": pendulum.duration(minutes=1)},

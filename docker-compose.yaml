@@ -38,8 +38,8 @@ services:
     restart: unless-stopped
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: frontend/Dockerfile
     ports:
       - "3000:3000"
     environment:
@@ -128,10 +128,12 @@ services:
         AIRFLOW__CORE__LOAD_EXAMPLES: "false"
         AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
         AIRFLOW__WEBSERVER__SECRET_KEY: bionicpro-dev-secret
+        PYTHONDONTWRITEBYTECODE: "1"
       volumes:
         - ./airflow/dags:/opt/airflow/dags
         - ./airflow/sql:/opt/airflow/sql
-    # Миграции, пользователь admin и подключения для DAG.
+        - ./airflow/scripts:/opt/airflow/scripts:ro
+    # Миграции, пользователь admin, подключения и начальная дата DAG.
     # Подключения сохраняются в базе Airflow, поэтому видны в интерфейсе: Admin -> Connections.
     command:
       - bash
@@ -147,8 +149,11 @@ services:
         add_conn crm_db --conn-type postgres --conn-host crm_db --conn-port 5432 --conn-schema crm_db --conn-login crm_user --conn-password crm_password --conn-description "CRM: клиенты и протезы (источник ETL)"
         add_conn telemetry_db --conn-type postgres --conn-host telemetry_db --conn-port 5432 --conn-schema telemetry_db --conn-login telemetry_user --conn-password telemetry_password --conn-description "Телеметрия протезов (источник ETL)"
         add_conn clickhouse --conn-type http --conn-host clickhouse --conn-port 8123 --conn-schema bionicpro --conn-login bionicpro --conn-password bionicpro_password --conn-description "ClickHouse: сырые таблицы и витрина отчётов"
+        python /opt/airflow/scripts/bootstrap_reports.py
     depends_on:
       airflow_db:
+        condition: service_healthy
+      telemetry_db:
         condition: service_healthy
   airflow-scheduler:
     <<: *airflow-common
@@ -176,7 +181,8 @@ services:
   # --- Задание 2: сервис отчётов ---
   reports-api:
     build:
-      context: ./reports-api
+      context: .
+      dockerfile: reports-api/Dockerfile
     environment:
       PORT: "8000"
       CORS_ORIGIN: http://localhost:3000

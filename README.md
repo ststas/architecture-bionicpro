@@ -35,3 +35,35 @@ Realm импортируется только в пустую базу Keycloak,
 - **ETL.** Airflow раз в день читает клиентов из CRM DB и телеметрию из PostgreSQL, записывает их в ClickHouse и собирает витрину `report_user_daily` — агрегаты телеметрии по клиенту и дню.
 - **Отдельный сервис отчётов.** Отчёты отдаёт Reports API, а не существующий API: тот занят приёмом телеметрии, и нагрузки не должны влиять друг на друга.
 - **Получение отчёта.** Reports API (`GET /reports`) проверяет токен по ключам Keycloak, определяет пользователя по токену и читает из витрины только его строки простым запросом, без вычислений на лету.
+
+### Задача 2
+
+Airflow DAG и окружение для него.
+
+**Окружение.** В [docker-compose.yaml](docker-compose.yaml) добавлены сервисы для отчётности:
+
+- `crm_db` и `telemetry_db` — заглушки источников на PostgreSQL с тестовыми данными ([db/crm/init.sql](db/crm/init.sql), [db/telemetry/init.sql](db/telemetry/init.sql)). Идентификаторы клиентов совпадают с атрибутом `customer_id` пользователей `prothetic1..3` в Keycloak; телеметрия сгенерирована за 10 дней до момента первого запуска.
+- `clickhouse` — OLAP-база `bionicpro`, порт 8123.
+- `airflow-scheduler`, `airflow-webserver`, `airflow_db` — Airflow с LocalExecutor и своей PostgreSQL; интерфейс на http://localhost:8081 (admin / admin). Подключения `crm_db`, `telemetry_db` и `clickhouse` создаются при инициализации и видны в интерфейсе: Admin → Connections.
+
+**DAG.** [airflow/dags/bionicpro_reports_etl.py](airflow/dags/bionicpro_reports_etl.py), расписание `@daily`. Каждый запуск обрабатывает один завершённый день:
+
+1. `create_tables` — создаёт таблицы ClickHouse по DDL из [airflow/sql](airflow/sql).
+2. `load_crm` — выгружает клиентов и их протезы из CRM в `crm_customers`.
+3. `load_telemetry` — выгружает телеметрию за день в `telemetry_raw`.
+4. `build_mart` — собирает витрину `report_user_daily`: агрегаты телеметрии за день по клиенту и протезу, объединённые с данными CRM.
+
+**Витрина.** Одна строка на пользователя, протез и день. Ключ сортировки `(customer_id, report_date, prosthesis_id)` даёт быстрый доступ к строкам одного клиента; партиции — по месяцам.
+
+**Связь пользователя с клиентом CRM.** У пользователя Keycloak есть атрибут `customer_id` — идентификатор клиента в CRM. Маппер клиента `reports-frontend` кладёт его в access-токен, поэтому связь подписана Keycloak и не зависит от данных CRM и ETL. Атрибут закрыт от изменения самим пользователем.
+
+**Идемпотентность.** Перед загрузкой задача удаляет строки своего дня, поэтому повторный запуск не создаёт дублей.
+
+**Как посмотреть результат.**
+
+- Запуски DAG — в интерфейсе Airflow: http://localhost:8081 (admin / admin), DAG `bionicpro_reports_etl`.
+- Витрина — в веб-интерфейсе ClickHouse: http://localhost:8123/play, пользователь `bionicpro`, пароль `bionicpro_password`, запрос:
+
+```sql
+SELECT * FROM bionicpro.report_user_daily ORDER BY customer_id, report_date, prosthesis_id
+```
